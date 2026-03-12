@@ -1,0 +1,78 @@
+# Elixir/Erlang
+_build/
+deps/
+*.beam
+*.dump
+erl_crash.dump
+*.o
+*.a
+
+# Elixir specific
+elixir_build.config
+/nerves/build/
+
+# Testing
+.coverage
+*.coverdata
+*.prof
+
+# Documentation
+doc/
+*.txt
+
+# Logs
+log/
+*.log
+/tmp/
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+ # IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.fleet/
+*.iml
+
+# Environment
+.env
+.env.*
+*.local
+
+# Workspace (user-specific)
+~/symphony-workspaces/
+symphony-workspaces/
+
+# Temporary files
+*.tmp
+*.bak
+*.backup
+WORKFLOW.md.backup
+
+ # Feishu / Linear credentials
+feishu_credentials.json
+linear_credentials.json
+*_credentials.json
+
+# Crash dumps
+erl_crash.dump.*
+
+# Mix
+mix.lock
+
+ # Node (if any)
+node_modules/
+
+ # Database
+*.db
+*.sqlite
+*.sqlite3
