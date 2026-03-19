@@ -5,11 +5,24 @@ defmodule SymphonyElixir.AgentRunner do
 
   require Logger
   alias SymphonyElixir.Codex.AppServer
-  alias SymphonyElixir.{Config, Linear.Issue, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.{Config, FeishuAdapter, Linear.Issue, PromptBuilder, Tracker, Workspace}
 
   @spec run(map(), pid() | nil, keyword()) :: :ok | no_return()
   def run(issue, codex_update_recipient \\ nil, opts \\ []) do
-    Logger.info("Starting agent run for #{issue_context(issue)}")
+    issue_state = Map.get(issue, :state)
+    issue_id = Map.get(issue, :id)
+
+    Logger.info("Starting agent run for #{issue_context(issue)} [state=#{issue_state}]")
+
+    # Update Feishu status to "in progress" when starting work on an issue
+    if issue_state == "待处理" do
+      case FeishuAdapter.update_issue_state(issue_id, "需求评估中") do
+        :ok ->
+          Logger.info("Updated Feishu status to '需求评估中' for issue #{issue_id}")
+        {:error, reason} ->
+          Logger.warning("Failed to update Feishu status: #{inspect(reason)}")
+      end
+    end
 
     case Workspace.create_for_issue(issue) do
       {:ok, workspace} ->

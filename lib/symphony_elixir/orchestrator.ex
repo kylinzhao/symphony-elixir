@@ -33,6 +33,7 @@ defmodule SymphonyElixir.Orchestrator do
       :poll_check_in_progress,
       :tick_timer_ref,
       :tick_token,
+      :paused,
       running: %{},
       completed: MapSet.new(),
       claimed: MapSet.new(),
@@ -60,6 +61,7 @@ defmodule SymphonyElixir.Orchestrator do
       poll_check_in_progress: false,
       tick_timer_ref: nil,
       tick_token: nil,
+      paused: false,
       codex_totals: @empty_codex_totals,
       codex_rate_limits: nil
     }
@@ -73,37 +75,49 @@ defmodule SymphonyElixir.Orchestrator do
   @impl true
   def handle_info({:tick, tick_token}, %{tick_token: tick_token} = state)
       when is_reference(tick_token) do
-    state = refresh_runtime_config(state)
+    if state.paused do
+      # Skip tick when paused, but reschedule to keep checking
+      state = schedule_tick(state, state.poll_interval_ms)
+      {:noreply, state}
+    else
+      state = refresh_runtime_config(state)
 
-    state = %{
-      state
-      | poll_check_in_progress: true,
-        next_poll_due_at_ms: nil,
-        tick_timer_ref: nil,
-        tick_token: nil
-    }
+      state = %{
+        state
+        | poll_check_in_progress: true,
+          next_poll_due_at_ms: nil,
+          tick_timer_ref: nil,
+          tick_token: nil
+      }
 
-    notify_dashboard()
-    :ok = schedule_poll_cycle_start()
-    {:noreply, state}
+      notify_dashboard()
+      :ok = schedule_poll_cycle_start()
+      {:noreply, state}
+    end
   end
 
   def handle_info({:tick, _tick_token}, state), do: {:noreply, state}
 
   def handle_info(:tick, state) do
-    state = refresh_runtime_config(state)
+    if state.paused do
+      # Skip tick when paused, but reschedule to keep checking
+      state = schedule_tick(state, state.poll_interval_ms)
+      {:noreply, state}
+    else
+      state = refresh_runtime_config(state)
 
-    state = %{
-      state
-      | poll_check_in_progress: true,
-        next_poll_due_at_ms: nil,
-        tick_timer_ref: nil,
-        tick_token: nil
-    }
+      state = %{
+        state
+        | poll_check_in_progress: true,
+          next_poll_due_at_ms: nil,
+          tick_timer_ref: nil,
+          tick_token: nil
+      }
 
-    notify_dashboard()
-    :ok = schedule_poll_cycle_start()
-    {:noreply, state}
+      notify_dashboard()
+      :ok = schedule_poll_cycle_start()
+      {:noreply, state}
+    end
   end
 
   def handle_info(:run_poll_cycle, state) do
@@ -195,6 +209,18 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_info({:retry_issue, _issue_id}, state), do: {:noreply, state}
 
+  def handle_info({:set_paused_state, paused_state}, state) do
+    Logger.info("Orchestrator paused state changed to: #{paused_state}")
+    new_state = %{state | paused: (paused_state == :paused)}
+
+    # If resuming, schedule a tick immediately
+    if state.paused and not new_state.paused do
+      new_state = schedule_tick(new_state, 0)
+    end
+
+    {:noreply, new_state}
+  end
+
   def handle_info(msg, state) do
     Logger.debug("Orchestrator ignored message: #{inspect(msg)}")
     {:noreply, state}
@@ -203,64 +229,125 @@ defmodule SymphonyElixir.Orchestrator do
   defp maybe_dispatch(%State{} = state) do
     state = reconcile_running_issues(state)
 
-    with :ok <- Config.validate!(),
-         {:ok, issues} <- Tracker.fetch_candidate_issues() do
-      IO.puts("[DEBUG] maybe_dispatch: got #{length(issues)} issues, available_slots: #{available_slots(state)}")
-      if available_slots(state) > 0 do
-        choose_issues(issues, state)
-      else
-        IO.puts("[DEBUG] maybe_dispatch: no available slots")
-        state
+    # Check if lifecycle is enabled
+    lifecycle_config = Config.settings!().lifecycle
+    lifecycle_enabled = lifecycle_config.enabled
+    IO.puts("[DEBUG] maybe_dispatch: lifecycle.enabled=#{lifecycle_enabled}")
+
+    if lifecycle_enabled do
+      IO.puts("[DEBUG] maybe_dispatch: lifecycle enabled, delegating to StageOrchestrator")
+
+      # When lifecycle is enabled, delegate issues to StageOrchestrator
+      # StageOrchestrator will handle stage-aware agent execution and Feishu status updates
+      case Tracker.fetch_candidate_issues() do
+        {:ok, issues} when is_list(issues) ->
+          IO.puts("[DEBUG] maybe_dispatch: delegating #{length(issues)} issues to StageOrchestrator")
+          # Process each issue through StageOrchestrator
+          Enum.each(issues, fn issue ->
+            issue_id = Map.get(issue, :id)
+            issue_identifier = Map.get(issue, :identifier)
+            IO.puts("[DEBUG] Spawning process for issue: #{issue_identifier}")
+
+            spawn(fn ->
+              IO.puts("[SPAWN-1] Process spawned for issue: #{issue_identifier}")
+
+              try do
+                IO.puts("[SPAWN-2] About to call StageOrchestrator for: #{issue_identifier}")
+                result = SymphonyElixir.Lifecycle.StageOrchestrator.process_issue(issue)
+                IO.puts("[SPAWN-3] StageOrchestrator returned for #{issue_identifier}: #{inspect(result)}")
+
+                case result do
+                  {:ok, :awaiting_confirmation, stage} ->
+                    Logger.info("Issue #{issue_id} awaiting confirmation for stage: #{stage}")
+
+                  {:ok, :completed, stage} ->
+                    Logger.info("Issue #{issue_id} completed stage: #{stage}")
+
+                  {:ok, :use_legacy_flow} ->
+                    Logger.warning("Issue #{issue_id} using legacy flow (lifecycle disabled)")
+
+                  {:error, reason} ->
+                    Logger.error("StageOrchestrator failed for issue #{issue_id}: #{inspect(reason)}")
+                end
+              rescue
+                e ->
+                  IO.puts("[SPAWN-ERROR] Exception for #{issue_identifier}: #{inspect(e)}")
+                  Logger.error("[Orchestrator] Exception processing issue #{issue_identifier}: #{inspect(e)}")
+                  Logger.error("[Orchestrator] Stacktrace: #{Exception.format(:error, e, __STACKTRACE__)}")
+              catch
+                :exit, reason ->
+                  IO.puts("[SPAWN-EXIT] Exit for #{issue_identifier}: #{inspect(reason)}")
+                  Logger.error("[Orchestrator] Exit processing issue #{issue_identifier}: #{inspect(reason)}")
+                :throw, reason ->
+                  IO.puts("[SPAWN-THROW] Throw for #{issue_identifier}: #{inspect(reason)}")
+                  Logger.error("[Orchestrator] Throw processing issue #{issue_identifier}: #{inspect(reason)}")
+              end
+            end)
+          end)
+          state
+
+        {:error, reason} ->
+          Logger.error("Failed to fetch issues: #{inspect(reason)}")
+          state
       end
     else
-      {:error, :missing_linear_api_token} ->
-        Logger.error("Linear API token missing in WORKFLOW.md")
-        state
+      with :ok <- Config.validate!(),
+           {:ok, issues} <- Tracker.fetch_candidate_issues() do
+        IO.puts("[DEBUG] maybe_dispatch: got #{length(issues)} issues, available_slots: #{available_slots(state)}")
+        if available_slots(state) > 0 do
+          choose_issues(issues, state)
+        else
+          IO.puts("[DEBUG] maybe_dispatch: no available slots")
+          state
+        end
+      else
+        {:error, :missing_linear_api_token} ->
+          Logger.error("Linear API token missing in WORKFLOW.md")
+          state
 
-      {:error, :missing_linear_project_slug} ->
-        Logger.error("Linear project slug missing in WORKFLOW.md")
-        state
+        {:error, :missing_linear_project_slug} ->
+          Logger.error("Linear project slug missing in WORKFLOW.md")
+          state
 
-      {:error, :missing_feishu_app_token} ->
-        Logger.error("Feishu app_token missing in WORKFLOW.md")
-        state
+        {:error, :missing_feishu_app_token} ->
+          Logger.error("Feishu app_token missing in WORKFLOW.md")
+          state
 
-      {:error, :missing_feishu_table_id} ->
-        Logger.error("Feishu table_id missing in WORKFLOW.md")
-        state
+        {:error, :missing_feishu_table_id} ->
+          Logger.error("Feishu table_id missing in WORKFLOW.md")
+          state
 
-      {:error, :missing_tracker_kind} ->
-        Logger.error("Tracker kind missing in WORKFLOW.md")
+        {:error, :missing_tracker_kind} ->
+          Logger.error("Tracker kind missing in WORKFLOW.md")
+          state
 
-        state
+        {:error, {:unsupported_tracker_kind, kind}} ->
+          Logger.error("Unsupported tracker kind in WORKFLOW.md: #{inspect(kind)}")
+          state
 
-      {:error, {:unsupported_tracker_kind, kind}} ->
-        Logger.error("Unsupported tracker kind in WORKFLOW.md: #{inspect(kind)}")
+        {:error, {:invalid_workflow_config, message}} ->
+          Logger.error("Invalid WORKFLOW.md config: #{message}")
+          state
 
-        state
+        {:error, {:missing_workflow_file, path, reason}} ->
+          Logger.error("Missing WORKFLOW.md at #{path}: #{inspect(reason)}")
+          state
 
-      {:error, {:invalid_workflow_config, message}} ->
-        Logger.error("Invalid WORKFLOW.md config: #{message}")
-        state
+        {:error, :workflow_front_matter_not_a_map} ->
+          Logger.error("Failed to parse WORKFLOW.md: workflow front matter must decode to a map")
+          state
 
-      {:error, {:missing_workflow_file, path, reason}} ->
-        Logger.error("Missing WORKFLOW.md at #{path}: #{inspect(reason)}")
-        state
+        {:error, {:workflow_parse_error, reason}} ->
+          Logger.error("Failed to parse WORKFLOW.md: #{inspect(reason)}")
+          state
 
-      {:error, :workflow_front_matter_not_a_map} ->
-        Logger.error("Failed to parse WORKFLOW.md: workflow front matter must decode to a map")
-        state
+        {:error, reason} ->
+          Logger.error("Failed to fetch from Linear: #{inspect(reason)}")
+          state
 
-      {:error, {:workflow_parse_error, reason}} ->
-        Logger.error("Failed to parse WORKFLOW.md: #{inspect(reason)}")
-        state
-
-      {:error, reason} ->
-        Logger.error("Failed to fetch from Linear: #{inspect(reason)}")
-        state
-
-      false ->
-        state
+        false ->
+          state
+      end
     end
   end
 

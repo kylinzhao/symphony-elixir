@@ -268,6 +268,28 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule Lifecycle do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+
+    embedded_schema do
+      field(:enabled, :boolean, default: false)
+      field(:stages, {:array, :map}, default: [])
+      field(:confirmation_points, {:array, :string}, default: [])
+      field(:stage_transitions, :map, default: %{})
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:enabled, :stages, :confirmation_points, :stage_transitions], empty_values: [])
+      |> validate_required([:stages])
+    end
+  end
+
   embedded_schema do
     embeds_one(:tracker, Tracker, on_replace: :update, defaults_to_struct: true)
     embeds_one(:polling, Polling, on_replace: :update, defaults_to_struct: true)
@@ -278,6 +300,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
     embeds_one(:ci_cd, CICD, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:lifecycle, Lifecycle, on_replace: :update, defaults_to_struct: true)
   end
 
   @spec parse(map()) :: {:ok, %__MODULE__{}} | {:error, {:invalid_workflow_config, String.t()}}
@@ -364,13 +387,16 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
+    |> cast_embed(:lifecycle, with: &Lifecycle.changeset/2)
   end
 
   defp finalize_settings(settings) do
     tracker = %{
       settings.tracker
       | api_key: resolve_secret_setting(settings.tracker.api_key, System.get_env("LINEAR_API_KEY")),
-        assignee: resolve_secret_setting(settings.tracker.assignee, System.get_env("LINEAR_ASSIGNEE"))
+        assignee: resolve_secret_setting(settings.tracker.assignee, System.get_env("LINEAR_ASSIGNEE")),
+        app_token: resolve_secret_setting(settings.tracker.app_token, System.get_env("FEISHU_APP_TOKEN")),
+        table_id: resolve_secret_setting(settings.tracker.table_id, System.get_env("FEISHU_TABLE_ID"))
     }
 
     workspace = %{

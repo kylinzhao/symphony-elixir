@@ -84,6 +84,26 @@ defmodule SymphonyElixir.FeishuClient do
     request(:get, "/bitable/v1/apps/#{app_token}/tables/#{table_id}/fields", %{})
   end
 
+  @doc """
+  获取多维表格的所有记录（分页）
+  """
+  def get_all_records(app_token, table_id, page_token \\ nil, page_size \\ 100) do
+    query = if page_token do
+      %{"page_size" => page_size, "page_token" => page_token}
+    else
+      %{"page_size" => page_size}
+    end
+
+    request(:get, "/bitable/v1/apps/#{app_token}/tables/#{table_id}/records", query)
+  end
+
+  @doc """
+  通用的 API 请求函数（公开版本）
+  """
+  def make_request(method, path, body \\ %{}) do
+    request(method, path, body)
+  end
+
   # 私有函数
 
   defp request(method, path, body) do

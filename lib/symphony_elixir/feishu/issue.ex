@@ -45,7 +45,7 @@ defmodule SymphonyElixir.Feishu.Issue do
 
     %__MODULE__{
       id: Map.get(record, "record_id"),
-      identifier: get_field_value(fields, "标题", "UNKNOWN"),
+      identifier: Map.get(record, "record_id", "UNKNOWN"),
       title: get_field_value(fields, "标题", ""),
       description: get_field_value(fields, "描述", nil),
       priority: parse_priority(get_field_value(fields, "优先级")),
@@ -79,7 +79,10 @@ defmodule SymphonyElixir.Feishu.Issue do
     case Map.get(fields, field_name) do
       nil -> ""
       %{"text" => text} -> text
-      value when is_binary(value) -> value
+      value when is_binary(value) ->
+        # 如果值看起来像选项 ID（以 "opt" 开头），返回它作为状态标识
+        # 否则直接返回值
+        value
       _ -> ""
     end
   end

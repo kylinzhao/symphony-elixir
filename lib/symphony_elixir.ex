@@ -29,6 +29,8 @@ defmodule SymphonyElixir.Application do
       SymphonyElixir.WorkflowStore,
       SymphonyElixir.StateStore,
       SymphonyElixir.ProgressMonitor,
+      {SymphonyElixir.Lifecycle.StageStateMachine, []},
+      {SymphonyElixir.Lifecycle.StageOrchestrator, []},
       SymphonyElixir.Orchestrator,
       SymphonyElixir.HttpServer,
       SymphonyElixir.StatusDashboard

@@ -6,6 +6,7 @@ defmodule SymphonyElixir.StateStore do
   use GenServer
 
   @table_name :symphony_state_store
+  @stage_transitions_table :symphony_stage_transitions
 
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -75,6 +76,7 @@ defmodule SymphonyElixir.StateStore do
 
   def init(_opts) do
     :ets.new(@table_name, [:named_table, :set, :public, read_concurrency: true])
+    :ets.new(@stage_transitions_table, [:named_table, :duplicate_bag, :public, read_concurrency: true])
     :ets.insert(@table_name, {:global_tokens, %{input_tokens: 0, output_tokens: 0, total_tokens: 0}})
     :ets.insert(@table_name, {:global_runtime, 0})
     {:ok, %{}}
@@ -107,6 +109,47 @@ defmodule SymphonyElixir.StateStore do
 
   def handle_cast({:update_task_progress, issue_id, progress}, state) do
     :ets.insert(@table_name, {{:task_progress, issue_id}, progress})
+    {:noreply, state}
+  end
+
+  # 阶段转换记录功能
+
+  @doc """
+  记录阶段转换
+
+  ## 参数
+    - transition: 包含 issue_id, from_stage, to_stage, confirmation_result, timestamp 的 map
+
+  ## 返回
+    - :ok
+  """
+  @spec record_stage_transition(map()) :: :ok
+  def record_stage_transition(transition) when is_map(transition) do
+    GenServer.cast(__MODULE__, {:record_stage_transition, transition})
+  end
+
+  @doc """
+  获取阶段转换历史
+
+  ## 参数
+    - issue_id: 飞书记录 ID
+
+  ## 返回
+    - 阶段转换历史列表，按时间排序
+  """
+  @spec get_stage_history(String.t()) :: [map()]
+  def get_stage_history(issue_id) do
+    :ets.tab2list(@stage_transitions_table)
+    |> Enum.filter(fn [{_key, transition}] -> Map.get(transition, :issue_id) == issue_id end)
+    |> Enum.map(fn [{_key, transition}] -> transition end)
+    |> Enum.sort_by(fn transition -> Map.get(transition, :timestamp) end)
+  end
+
+  def handle_cast({:record_stage_transition, transition}, state) do
+    issue_id = Map.get(transition, :issue_id)
+    timestamp = Map.get(transition, :timestamp)
+    key = {issue_id, timestamp}
+    :ets.insert(@stage_transitions_table, [{key, transition}])
     {:noreply, state}
   end
 end
